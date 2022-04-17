@@ -14,21 +14,24 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with Paramiko; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA.
+# 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA.
+
 
 """
 Common API for all public keys.
+WILL UTILIZE UNTIL #1103 IS MERGED
+https://github.com/paramiko/paramiko/pull/1103
 """
 
 import base64
 from binascii import unhexlify
 import os
-from hashlib import md5
 import re
 import struct
 
 import six
 import bcrypt
+from hashlib import sha512, md5, sha256
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
@@ -140,14 +143,7 @@ class PKey(object):
         return cmp(self.asbytes(), other.asbytes())  # noqa
 
     def __eq__(self, other):
-        return self._fields == other._fields
-
-    def __hash__(self):
-        return hash(self._fields)
-
-    @property
-    def _fields(self):
-        raise NotImplementedError
+        return hash(self) == hash(other)
 
     def get_name(self):
         """
@@ -175,7 +171,33 @@ class PKey(object):
         """
         return False
 
-    def get_fingerprint(self):
+    def get_sha256_fingerprint(self):
+        """
+        Returns an openssh SHA256 fingerprint of the public part of this key.
+        SHA256 fingerprint is calculated by base64 encoding the sha256 digest
+        of the key and then removing the base64 trailing == chars
+        Nothing secret is revealed.
+
+        :return:
+            a 43-byte `string <str>` (base64) of the SHA256 fingerprint,
+            in SSH format.
+        """
+        return base64.b64encode(b(sha256(self.asbytes()).digest()))[:-1]
+
+    def get_sha512_fingerprint(self):
+        """
+        Returns an openssh SHA512 fingerprint of the public part of this key.
+        SHA512 fingerprint is calculated by base64 encoding the sha512 digest
+        of the key and then removing the two base64 trailing == chars
+        Nothing secret is revealed.
+
+        :return:
+            a 86-byte `string <str>` (base64) of the SHA512 fingerprint,
+            in SSH format.
+        """
+        return base64.b64encode(b(sha512(self.asbytes()).digest()))[:-2]
+
+    def get_md5_fingerprint(self):
         """
         Return an MD5 fingerprint of the public part of this key.  Nothing
         secret is revealed.
@@ -184,7 +206,38 @@ class PKey(object):
             a 16-byte `string <str>` (binary) of the MD5 fingerprint, in SSH
             format.
         """
-        return md5(self.asbytes(), usedforsecurity=False).digest()
+        return md5(self.asbytes()).digest()
+
+    def get_available_fingerprint_methods(self):
+        """
+        Return a dictionary of available hash algorithms and  their method
+        callbacks.
+
+        :return:
+            a `dictionary <dict>` containing the available hash algorithms
+            and their method callbacks.
+        """
+        return dict(
+            sha512=self.get_sha512_fingerprint,
+            sha256=self.get_sha256_fingerprint,
+            md5=self.get_md5_fingerprint,
+        )
+
+    def get_fingerprint(self, algorithm="md5"):
+        """
+        Returns an openssh fingerprint of the public part of this key.
+        Nothing secret is revealed.
+
+        :return:
+            Depending on the algorithm variable can return
+            a 16-byte `string <str>` (binary) of the MD5 fingerprint, in SSH
+            format. (default)
+            a 43-byte `string <str>` (base64) of the SHA256 fingerprint,
+            in SSH format.
+            a 86-byte `string <str>` (base64) of the SHA512 fingerprint,
+            in SSH format.
+        """
+        return self.get_available_fingerprint_methods().get(algorithm, "md5")()
 
     def get_base64(self):
         """
@@ -196,20 +249,13 @@ class PKey(object):
         """
         return u(encodebytes(self.asbytes())).replace("\n", "")
 
-    def sign_ssh_data(self, data, algorithm=None):
+    def sign_ssh_data(self, data):
         """
         Sign a blob of data with this private key, and return a `.Message`
         representing an SSH signature message.
 
-        :param str data:
-            the data to sign.
-        :param str algorithm:
-            the signature algorithm to use, if different from the key's
-            internal name. Default: ``None``.
+        :param str data: the data to sign.
         :return: an SSH signature `message <.Message>`.
-
-        .. versionchanged:: 2.9
-            Added the ``algorithm`` kwarg.
         """
         return bytes()
 
@@ -558,18 +604,7 @@ class PKey(object):
 
         :raises: ``IOError`` -- if there was an error writing the file.
         """
-        # Ensure that we create new key files directly with a user-only mode,
-        # instead of opening, writing, then chmodding, which leaves us open to
-        # CVE-2022-24302.
-        # NOTE: O_TRUNC is a noop on new files, and O_CREAT is a noop on
-        # existing files, so using all 3 in both cases is fine. Ditto the use
-        # of the 'mode' argument; it should be safe to give even for existing
-        # files (though it will not act like a chmod in that case).
-        # TODO 3.0: turn into kwargs again
-        args = [os.O_WRONLY | os.O_TRUNC | os.O_CREAT, o600]
-        # NOTE: yea, you still gotta inform the FLO that it is in "write" mode
-        with os.fdopen(os.open(filename, *args), "w") as f:
-            # TODO 3.0: remove the now redundant chmod
+        with open(filename, "w") as f:
             os.chmod(filename, o600)
             self._write_private_key(f, key, format, password=password)
 
@@ -677,8 +712,7 @@ class PublicBlob(object):
     Tries to be as dumb as possible and barely cares about specific
     per-key-type data.
 
-    .. note::
-
+    ..note::
         Most of the time you'll want to call `from_file`, `from_string` or
         `from_message` for useful instantiation, the main constructor is
         basically "I should be using ``attrs`` for this."
